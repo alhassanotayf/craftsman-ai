@@ -9,6 +9,7 @@ type AnalysisResult = {
   priority?: "normal" | "urgent";
   confidence?: number;
   reasoning?: string;
+  description?: string;
   [key: string]: any;
 };
 
@@ -18,14 +19,12 @@ export default function HomePage() {
 
   const [text, setText] = useState("");
 
-  const [result, setResult] =
-    useState<AnalysisResult | null>(null);
+  // IMPORTANT:
+  // We now keep ALL AI results instead of only items[0].
+  const [results, setResults] = useState<AnalysisResult[]>([]);
 
-  const [selectedCategory, setSelectedCategory] =
-    useState("");
-
-  const [selectedPriority, setSelectedPriority] =
-    useState<"normal" | "urgent">("normal");
+  // Editable values for every detected problem.
+  const [editedResults, setEditedResults] = useState<AnalysisResult[]>([]);
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -48,12 +47,33 @@ export default function HomePage() {
     }
 
     return ar
-      ? found.labelAr ||
-          found.label ||
-          found.value
-      : found.labelEn ||
-          found.label ||
-          found.value;
+      ? found.labelAr || found.label || found.value
+      : found.labelEn || found.label || found.value;
+  }
+
+  /*
+   * Update one result
+   */
+  function updateResult(
+    index: number,
+    field: "category" | "priority",
+    value: string
+  ) {
+    setEditedResults((current) =>
+      current.map((item, itemIndex) => {
+        if (itemIndex !== index) {
+          return item;
+        }
+
+        return {
+          ...item,
+          [field]: value,
+        };
+      })
+    );
+
+    setSaved(false);
+    setError("");
   }
 
   /*
@@ -73,30 +93,27 @@ export default function HomePage() {
 
     setLoading(true);
     setError("");
-    setResult(null);
+    setResults([]);
+    setEditedResults([]);
     setSaved(false);
 
     try {
       /*
        * Send text to API
        */
-      const response = await fetch(
-        "/api/classify",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+      const response = await fetch("/api/classify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
 
-          /*
-           * IMPORTANT:
-           * classify/route.ts expects "text"
-           */
-          body: JSON.stringify({
-            text: cleanText,
-          }),
-        }
-      );
+        /*
+         * classify/route.ts expects "text"
+         */
+        body: JSON.stringify({
+          text: cleanText,
+        }),
+      });
 
       const data = await response.json();
 
@@ -112,23 +129,36 @@ export default function HomePage() {
       }
 
       /*
-       * YOUR API RETURNS:
+       * IMPORTANT:
+       *
+       * Gemini returns:
        *
        * {
        *   items: [...]
        * }
        *
-       * So we MUST read items[0]
+       * We MUST keep ALL items.
+       *
+       * Previously the application used:
+       *
+       * data?.items?.[0]
+       *
+       * which meant only the first problem was kept.
        */
-      const analysis =
-        data?.items?.[0] ||
-        data?.result ||
-        data?.classification ||
-        null;
 
-      console.log("ANALYSIS RESULT:", analysis);
+      let analyses: AnalysisResult[] = [];
 
-      if (!analysis) {
+      if (Array.isArray(data?.items)) {
+        analyses = data.items;
+      } else if (data?.result) {
+        analyses = [data.result];
+      } else if (data?.classification) {
+        analyses = [data.classification];
+      }
+
+      console.log("ALL ANALYSIS RESULTS:", analyses);
+
+      if (!analyses.length) {
         throw new Error(
           ar
             ? "لم يتم استلام نتيجة التحليل."
@@ -137,34 +167,35 @@ export default function HomePage() {
       }
 
       /*
-       * Save complete result
+       * If the AI returns multiple problems, each one becomes
+       * a separate editable result.
+       *
+       * If the AI returns one problem, it still works normally.
        */
-      setResult(analysis);
-
-      /*
-       * Automatically select AI category
-       */
-      if (analysis.category) {
-        setSelectedCategory(
-          analysis.category
-        );
-      } else {
-        setSelectedCategory("");
-      }
-
-      /*
-       * Automatically select AI priority
-       */
-      if (analysis.priority === "urgent") {
-        setSelectedPriority("urgent");
-      } else {
-        setSelectedPriority("normal");
-      }
-    } catch (err: any) {
-      console.error(
-        "CLASSIFICATION ERROR:",
-        err
+      const normalizedResults = analyses.map(
+        (analysis: AnalysisResult) => ({
+          ...analysis,
+          description:
+            analysis.description?.trim() || cleanText,
+          priority:
+            analysis.priority === "urgent"
+              ? "urgent"
+              : "normal",
+        })
       );
+
+      setResults(normalizedResults);
+
+      /*
+       * Create editable copy.
+       */
+      setEditedResults(
+        normalizedResults.map((item) => ({
+          ...item,
+        }))
+      );
+    } catch (err: any) {
+      console.error("CLASSIFICATION ERROR:", err);
 
       setError(
         err?.message ||
@@ -178,7 +209,9 @@ export default function HomePage() {
   }
 
   /*
-   * SAVE REQUEST
+   * SAVE ALL REQUESTS
+   *
+   * Every detected problem is saved as a separate request.
    */
   async function saveRequest() {
     if (!text.trim()) {
@@ -190,11 +223,27 @@ export default function HomePage() {
       return;
     }
 
-    if (!selectedCategory) {
+    if (!editedResults.length) {
       setError(
         ar
-          ? "يرجى اختيار نوع الخدمة."
-          : "Please select a service type."
+          ? "يرجى تحليل المشكلة أولاً."
+          : "Please analyze the problem first."
+      );
+      return;
+    }
+
+    /*
+     * Make sure every problem has a category.
+     */
+    const missingCategory = editedResults.some(
+      (item) => !item.category
+    );
+
+    if (missingCategory) {
+      setError(
+        ar
+          ? "يرجى اختيار نوع الخدمة لكل مشكلة."
+          : "Please select a service type for every problem."
       );
       return;
     }
@@ -204,57 +253,68 @@ export default function HomePage() {
     setSaved(false);
 
     try {
-      const response = await fetch(
-        "/api/requests",
-        {
-          method: "POST",
+      /*
+       * IMPORTANT:
+       *
+       * Instead of sending one item, send ALL detected problems.
+       *
+       * Each item has its own:
+       * - description
+       * - category
+       * - priority
+       */
+      const itemsToSave = editedResults.map((item) => ({
+        description:
+          item.description?.trim() || text.trim(),
+        category: item.category,
+        priority:
+          item.priority === "urgent"
+            ? "urgent"
+            : "normal",
+      }));
 
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-
-          body: JSON.stringify({
-            items: [
-              {
-                description:
-                  text.trim(),
-
-                category:
-                  selectedCategory,
-
-                priority:
-                  selectedPriority,
-              },
-            ],
-          }),
-        }
+      console.log(
+        "SAVING SEPARATE REQUESTS:",
+        itemsToSave
       );
 
-      const data =
-        await response.json();
+      const response = await fetch("/api/requests", {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json",
+        },
+
+        body: JSON.stringify({
+          items: itemsToSave,
+        }),
+      });
+
+      const data = await response.json();
 
       if (!response.ok) {
         throw new Error(
           data?.error ||
             (ar
-              ? "فشل حفظ الطلب."
-              : "Failed to save request.")
+              ? "فشل حفظ الطلبات."
+              : "Failed to save requests.")
         );
       }
 
       setSaved(true);
-    } catch (err: any) {
-      console.error(
-        "SAVE ERROR:",
-        err
+
+      console.log(
+        "REQUESTS SAVED SUCCESSFULLY:",
+        data
       );
+    } catch (err: any) {
+      console.error("SAVE ERROR:", err);
 
       setError(
         err?.message ||
           (ar
-            ? "حدث خطأ أثناء حفظ الطلب."
-            : "An error occurred while saving the request.")
+            ? "حدث خطأ أثناء حفظ الطلبات."
+            : "An error occurred while saving the requests.")
       );
     } finally {
       setSaving(false);
@@ -326,8 +386,8 @@ export default function HomePage() {
           <p className="mt-2 text-sm leading-7 text-slate-500">
 
             {ar
-              ? "صف المشكلة بالتفصيل للحصول على تصنيف أدق."
-              : "Describe the problem in detail for a more accurate classification."}
+              ? "صف المشكلة بالتفصيل للحصول على تصنيف أدق. إذا كان الوصف يحتوي على أكثر من مشكلة، سيتم فصلها إلى طلبات مستقلة."
+              : "Describe the problem in detail for a more accurate classification. If the description contains multiple problems, they will be separated into individual requests."}
 
           </p>
 
@@ -357,8 +417,8 @@ export default function HomePage() {
             dir={ar ? "rtl" : "ltr"}
             placeholder={
               ar
-                ? "مثال: المكيف لا يعمل ويصدر صوتاً مرتفعاً عند تشغيله..."
-                : "Example: The air conditioner is not working and makes a loud noise when turned on..."
+                ? "مثال: المكيف لا يعمل ويصدر صوتاً مرتفعاً، والمغسلة تسرب ماء، والمقبس الكهربائي لا يعمل..."
+                : "Example: The air conditioner is not working, the sink is leaking, and an electrical socket is not working..."
             }
             className="min-h-[300px] w-full resize-none rounded-[24px] border border-slate-200 bg-white p-6 text-lg leading-9 text-[#173743] outline-none transition placeholder:text-slate-400 focus:border-[#f2a51a] focus:ring-4 focus:ring-[#f2a51a]/10"
           />
@@ -444,17 +504,19 @@ export default function HomePage() {
 
 
       {/* ================================================= */}
-      {/* ANALYSIS RESULT */}
+      {/* ANALYSIS RESULTS */}
       {/* ================================================= */}
 
-      {result && (
+      {editedResults.length > 0 && (
 
         <section
           dir={ar ? "rtl" : "ltr"}
           className="rounded-[30px] border border-slate-200 bg-white/95 p-6 shadow-sm sm:p-8"
         >
 
+          {/* ================================================= */}
           {/* RESULT HEADER */}
+          {/* ================================================= */}
 
           <div className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
 
@@ -474,230 +536,334 @@ export default function HomePage() {
 
               </h2>
 
-            </div>
+              <p className="mt-2 text-sm text-slate-500">
 
-
-            {/* CONFIDENCE */}
-
-            {typeof result.confidence ===
-              "number" && (
-
-              <div className="rounded-full bg-[#f2a51a]/15 px-4 py-2 text-sm font-bold text-[#8b5b00]">
-
-                {ar
-                  ? "الثقة"
-                  : "Confidence"}
-
-                {" "}
-
-                {Math.round(
-                  result.confidence <= 1
-                    ? result.confidence *
-                        100
-                    : result.confidence
-                )}
-                %
-
-              </div>
-
-            )}
-
-          </div>
-
-
-          {/* ================================================= */}
-          {/* SERVICE TYPE */}
-          {/* ================================================= */}
-
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-
-            <label className="block text-sm font-bold text-slate-500">
-
-              {ar
-                ? "نوع الخدمة"
-                : "Service Type"}
-
-            </label>
-
-
-            <select
-              value={selectedCategory}
-              onChange={(e) =>
-                setSelectedCategory(
-                  e.target.value
-                )
-              }
-              className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-4 py-4 text-lg font-bold text-[#173743] outline-none transition focus:border-[#f2a51a] focus:ring-4 focus:ring-[#f2a51a]/10"
-            >
-
-              <option value="">
-
-                {ar
-                  ? "اختر نوع الخدمة"
-                  : "Select service type"}
-
-              </option>
-
-
-              {CATEGORIES.map(
-                (item: any) => (
-
-                  <option
-                    key={item.value}
-                    value={item.value}
-                  >
-
-                    {ar
-                      ? item.labelAr ||
-                        item.label ||
-                        item.value
-                      : item.labelEn ||
-                        item.label ||
-                        item.value}
-
-                  </option>
-
-                )
-              )}
-
-            </select>
-
-
-            {/* AI SUGGESTION */}
-
-            {result.category && (
-
-              <div className="mt-3 text-xs font-medium text-slate-400">
-
-                {ar
-                  ? "اقتراح الذكاء الاصطناعي:"
-                  : "AI suggestion:"}
-
-                {" "}
-
-                <span className="font-bold text-[#173743]">
-
-                  {getCategoryLabel(
-                    result.category
-                  )}
-
-                </span>
-
-              </div>
-
-            )}
-
-          </div>
-
-
-          {/* ================================================= */}
-          {/* PRIORITY */}
-          {/* ================================================= */}
-
-          <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5">
-
-            <label className="block text-sm font-bold text-slate-500">
-
-              {ar
-                ? "الأولوية"
-                : "Priority"}
-
-            </label>
-
-
-            <select
-              value={selectedPriority}
-              onChange={(e) =>
-                setSelectedPriority(
-                  e.target.value as
-                    | "normal"
-                    | "urgent"
-                )
-              }
-              className={`mt-3 w-full rounded-xl border bg-white px-4 py-4 text-lg font-bold outline-none transition focus:ring-4 ${
-                selectedPriority ===
-                "urgent"
-                  ? "border-red-200 text-red-600 focus:border-red-400 focus:ring-red-100"
-                  : "border-slate-200 text-[#173743] focus:border-[#f2a51a] focus:ring-[#f2a51a]/10"
-              }`}
-            >
-
-              <option value="normal">
-
-                {ar
-                  ? "عادي"
-                  : "Normal"}
-
-              </option>
-
-              <option value="urgent">
-
-                {ar
-                  ? "عاجل"
-                  : "Urgent"}
-
-              </option>
-
-            </select>
-
-
-            {/* AI PRIORITY */}
-
-            <div className="mt-3 text-xs font-medium text-slate-400">
-
-              {ar
-                ? "اقتراح الذكاء الاصطناعي:"
-                : "AI suggestion:"}
-
-              {" "}
-
-              <span className="font-bold text-[#173743]">
-
-                {result.priority ===
-                "urgent"
+                {editedResults.length === 1
                   ? ar
-                    ? "عاجل"
-                    : "Urgent"
+                    ? "تم اكتشاف مشكلة واحدة."
+                    : "One problem detected."
                   : ar
-                  ? "عادي"
-                  : "Normal"}
-
-              </span>
-
-            </div>
-
-          </div>
-
-
-          {/* ================================================= */}
-          {/* REASONING */}
-          {/* ================================================= */}
-
-          {result.reasoning && (
-
-            <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-5">
-
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-400">
-
-                {ar
-                  ? "تفاصيل التحليل"
-                  : "Analysis Details"}
-
-              </div>
-
-              <p className="mt-3 leading-8 text-slate-600">
-
-                {result.reasoning}
+                    ? `تم اكتشاف ${editedResults.length} مشاكل. كل مشكلة ستُحفظ كطلب مستقل.`
+                    : `${editedResults.length} problems detected. Each problem will be saved as a separate request.`}
 
               </p>
 
             </div>
 
-          )}
+          </div>
 
 
           {/* ================================================= */}
-          {/* SAVE */}
+          {/* ALL DETECTED PROBLEMS */}
+          {/* ================================================= */}
+
+          <div className="space-y-6">
+
+            {editedResults.map(
+              (result, index) => (
+
+                <div
+                  key={`${index}-${result.description || "problem"}`}
+                  className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm sm:p-6"
+                >
+
+                  {/* ================================================= */}
+                  {/* PROBLEM NUMBER */}
+                  {/* ================================================= */}
+
+                  <div className="mb-5 flex items-center justify-between gap-3">
+
+                    <div className="flex items-center gap-3">
+
+                      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#173743] text-sm font-black text-white">
+
+                        {index + 1}
+
+                      </div>
+
+                      <div>
+
+                        <div className="text-xs font-bold uppercase tracking-[0.15em] text-slate-400">
+
+                          {ar
+                            ? `المشكلة ${index + 1}`
+                            : `Problem ${index + 1}`}
+
+                        </div>
+
+                        <div className="mt-1 text-sm font-bold text-[#173743]">
+
+                          {ar
+                            ? "طلب صيانة مستقل"
+                            : "Independent service request"}
+
+                        </div>
+
+                      </div>
+
+                    </div>
+
+
+                    {/* CONFIDENCE */}
+
+                    {typeof result.confidence ===
+                      "number" && (
+
+                      <div className="rounded-full bg-[#f2a51a]/15 px-4 py-2 text-sm font-bold text-[#8b5b00]">
+
+                        {ar
+                          ? "الثقة"
+                          : "Confidence"}
+
+                        {" "}
+
+                        {Math.round(
+                          result.confidence <= 1
+                            ? result.confidence *
+                              100
+                            : result.confidence
+                        )}
+
+                        %
+
+                      </div>
+
+                    )}
+
+                  </div>
+
+
+                  {/* ================================================= */}
+                  {/* DESCRIPTION */}
+                  {/* ================================================= */}
+
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+
+                    <label className="block text-sm font-bold text-slate-500">
+
+                      {ar
+                        ? "وصف المشكلة"
+                        : "Problem Description"}
+
+                    </label>
+
+                    <p className="mt-3 text-base font-semibold leading-8 text-[#173743]">
+
+                      {result.description ||
+                        text.trim()}
+
+                    </p>
+
+                  </div>
+
+
+                  {/* ================================================= */}
+                  {/* SERVICE TYPE */}
+                  {/* ================================================= */}
+
+                  <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+
+                    <label className="block text-sm font-bold text-slate-500">
+
+                      {ar
+                        ? "نوع الخدمة"
+                        : "Service Type"}
+
+                    </label>
+
+
+                    <select
+                      value={result.category || ""}
+                      onChange={(e) =>
+                        updateResult(
+                          index,
+                          "category",
+                          e.target.value
+                        )
+                      }
+                      className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-4 py-4 text-lg font-bold text-[#173743] outline-none transition focus:border-[#f2a51a] focus:ring-4 focus:ring-[#f2a51a]/10"
+                    >
+
+                      <option value="">
+
+                        {ar
+                          ? "اختر نوع الخدمة"
+                          : "Select service type"}
+
+                      </option>
+
+
+                      {CATEGORIES.map(
+                        (item: any) => (
+
+                          <option
+                            key={item.value}
+                            value={item.value}
+                          >
+
+                            {ar
+                              ? item.labelAr ||
+                                item.label ||
+                                item.value
+                              : item.labelEn ||
+                                item.label ||
+                                item.value}
+
+                          </option>
+
+                        )
+                      )}
+
+                    </select>
+
+
+                    {/* AI SUGGESTION */}
+
+                    {result.category && (
+
+                      <div className="mt-3 text-xs font-medium text-slate-400">
+
+                        {ar
+                          ? "اقتراح الذكاء الاصطناعي:"
+                          : "AI suggestion:"}
+
+                        {" "}
+
+                        <span className="font-bold text-[#173743]">
+
+                          {getCategoryLabel(
+                            result.category
+                          )}
+
+                        </span>
+
+                      </div>
+
+                    )}
+
+                  </div>
+
+
+                  {/* ================================================= */}
+                  {/* PRIORITY */}
+                  {/* ================================================= */}
+
+                  <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+
+                    <label className="block text-sm font-bold text-slate-500">
+
+                      {ar
+                        ? "الأولوية"
+                        : "Priority"}
+
+                    </label>
+
+
+                    <select
+                      value={
+                        result.priority ===
+                        "urgent"
+                          ? "urgent"
+                          : "normal"
+                      }
+                      onChange={(e) =>
+                        updateResult(
+                          index,
+                          "priority",
+                          e.target.value
+                        )
+                      }
+                      className={`mt-3 w-full rounded-xl border bg-white px-4 py-4 text-lg font-bold outline-none transition focus:ring-4 ${
+                        result.priority ===
+                        "urgent"
+                          ? "border-red-200 text-red-600 focus:border-red-400 focus:ring-red-100"
+                          : "border-slate-200 text-[#173743] focus:border-[#f2a51a] focus:ring-[#f2a51a]/10"
+                      }`}
+                    >
+
+                      <option value="normal">
+
+                        {ar
+                          ? "عادي"
+                          : "Normal"}
+
+                      </option>
+
+                      <option value="urgent">
+
+                        {ar
+                          ? "عاجل"
+                          : "Urgent"}
+
+                      </option>
+
+                    </select>
+
+
+                    {/* AI PRIORITY */}
+
+                    <div className="mt-3 text-xs font-medium text-slate-400">
+
+                      {ar
+                        ? "اقتراح الذكاء الاصطناعي:"
+                        : "AI suggestion:"}
+
+                      {" "}
+
+                      <span className="font-bold text-[#173743]">
+
+                        {result.priority ===
+                        "urgent"
+                          ? ar
+                            ? "عاجل"
+                            : "Urgent"
+                          : ar
+                            ? "عادي"
+                            : "Normal"}
+
+                      </span>
+
+                    </div>
+
+                  </div>
+
+
+                  {/* ================================================= */}
+                  {/* REASONING */}
+                  {/* ================================================= */}
+
+                  {result.reasoning && (
+
+                    <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-5">
+
+                      <div className="text-xs font-bold uppercase tracking-wider text-slate-400">
+
+                        {ar
+                          ? "تفاصيل التحليل"
+                          : "Analysis Details"}
+
+                      </div>
+
+                      <p className="mt-3 leading-8 text-slate-600">
+
+                        {result.reasoning}
+
+                      </p>
+
+                    </div>
+
+                  )}
+
+                </div>
+
+              )
+            )}
+
+          </div>
+
+
+          {/* ================================================= */}
+          {/* SAVE ALL */}
           {/* ================================================= */}
 
           <button
@@ -706,25 +872,30 @@ export default function HomePage() {
             disabled={
               saving ||
               saved ||
-              !selectedCategory
+              editedResults.length === 0
             }
-            className="primary-button mt-6 w-full"
+            className="primary-button mt-7 w-full"
           >
 
             {saving
 
               ? ar
-                ? "جاري الحفظ..."
-                : "Saving..."
+                ? "جاري حفظ الطلبات..."
+                : "Saving requests..."
 
               : saved
-              ? ar
-                ? "✓ تم حفظ الطلب"
-                : "✓ Request Saved"
 
-              : ar
-              ? "حفظ كطلب صيانة"
-              : "Save as Service Request"}
+                ? ar
+                  ? `✓ تم حفظ ${editedResults.length} طلبات`
+                  : `✓ ${editedResults.length} Request${editedResults.length === 1 ? "" : "s"} Saved`
+
+                : editedResults.length > 1
+                  ? ar
+                    ? `حفظ ${editedResults.length} طلبات مستقلة`
+                    : `Save ${editedResults.length} Separate Requests`
+                  : ar
+                    ? "حفظ كطلب صيانة"
+                    : "Save as Service Request"}
 
           </button>
 
@@ -737,9 +908,13 @@ export default function HomePage() {
 
             <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-center text-sm font-semibold text-emerald-700">
 
-              {ar
-                ? "تم حفظ الطلب بنجاح ويمكنك رؤيته في صفحة الطلبات."
-                : "Request saved successfully. You can view it on the Requests page."}
+              {editedResults.length > 1
+                ? ar
+                  ? `تم حفظ ${editedResults.length} طلبات مستقلة بنجاح ويمكنك رؤيتها في صفحة الطلبات.`
+                  : `${editedResults.length} separate requests were saved successfully. You can view them on the Requests page.`
+                : ar
+                  ? "تم حفظ الطلب بنجاح ويمكنك رؤيته في صفحة الطلبات."
+                  : "Request saved successfully. You can view it on the Requests page."}
 
             </div>
 
