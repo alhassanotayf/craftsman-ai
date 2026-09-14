@@ -1,0 +1,9 @@
+# Both are optional. If neither is set, the app automatically uses the
+# built-in mock classifier (see lib/ai.ts) - no key required to run this
+# project.
+#
+# If ANTHROPIC_API_KEY is set, it's used first. OPENAI_API_KEY is a fallback
+# used only if ANTHROPIC_API_KEY is not set.
+
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
